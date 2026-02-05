@@ -13,14 +13,11 @@ import android.media.MediaPlayer
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
-import io.ktor.http.*
-import io.ktor.server.application.*
-import io.ktor.server.engine.*
-import io.ktor.server.netty.*
-import io.ktor.server.response.*
-import io.ktor.server.routing.*
-import kotlinx.coroutines.*
+import okhttp3.*
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 class AlarmServerService : Service() {
 
@@ -28,7 +25,6 @@ class AlarmServerService : Service() {
         const val ACTION_START_SERVER = "com.soundalarm.START_SERVER"
         const val ACTION_STOP_SERVER = "com.soundalarm.STOP_SERVER"
         const val ACTION_STOP_ALARM = "com.soundalarm.STOP_ALARM"
-        const val ACTION_PLAY_ALARM = "com.soundalarm.PLAY_ALARM"
         
         const val ACTION_ALARM_STARTED = "com.soundalarm.ALARM_STARTED"
         const val ACTION_ALARM_STOPPED = "com.soundalarm.ALARM_STOPPED"
@@ -37,14 +33,17 @@ class AlarmServerService : Service() {
         
         private const val CHANNEL_ID = "alarm_server_channel"
         private const val NOTIFICATION_ID = 1
-        private const val PORT = 8080
+        private const val SERVER_URL = "wss://alarm-server-3aag.onrender.com"
+        private const val TAG = "AlarmServerService"
     }
 
-    private var server: ApplicationEngine? = null
+    private var webSocket: WebSocket? = null
     private var mediaPlayer: MediaPlayer? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var isAlarmPlaying = false
-    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val client = OkHttpClient.Builder()
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -56,10 +55,9 @@ class AlarmServerService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START_SERVER -> startServer()
+            ACTION_START_SERVER -> connectToServer()
             ACTION_STOP_SERVER -> stopServer()
             ACTION_STOP_ALARM -> stopAlarm()
-            ACTION_PLAY_ALARM -> playAlarm()
         }
         return START_STICKY
     }
@@ -67,9 +65,8 @@ class AlarmServerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopAlarm()
-        server?.stop(1000, 2000)
+        webSocket?.close(1000, "Service destroyed")
         wakeLock?.release()
-        serviceScope.cancel()
     }
 
     private fun createNotificationChannel() {
@@ -79,10 +76,9 @@ class AlarmServerService : Service() {
                 "Alarm Server",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Serwer alarmu działa w tle"
+                description = "Połączenie z serwerem alarmu"
                 setSound(null, null)
             }
-            
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager.createNotificationChannel(channel)
         }
@@ -92,13 +88,13 @@ class AlarmServerService : Service() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
-            "SoundAlarm::ServerWakeLock"
+            "SoundAlarm::WebSocketWakeLock"
         ).apply {
-            acquire(10 * 60 * 60 * 1000L) // 10 godzin max
+            acquire(10 * 60 * 60 * 1000L)
         }
     }
 
-    private fun buildNotification(isPlaying: Boolean): Notification {
+    private fun buildNotification(status: String): Notification {
         val mainIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
             this, 0, mainIntent,
@@ -114,14 +110,14 @@ class AlarmServerService : Service() {
         )
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(if (isPlaying) "🔊 ALARM!" else "Serwer alarmu")
-            .setContentText(if (isPlaying) "Dźwięk gra - naciśnij aby wyłączyć" else "Nasłuchuje na porcie $PORT")
+            .setContentTitle(if (isAlarmPlaying) "🔊 ALARM!" else "Sound Alarm")
+            .setContentText(status)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
 
-        if (isPlaying) {
+        if (isAlarmPlaying) {
             builder.addAction(
                 android.R.drawable.ic_media_pause,
                 "Wyłącz alarm",
@@ -132,105 +128,67 @@ class AlarmServerService : Service() {
         return builder.build()
     }
 
-    private fun updateNotification(isPlaying: Boolean) {
-        val notification = buildNotification(isPlaying)
+    private fun updateNotification(status: String) {
+        val notification = buildNotification(status)
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
-    private fun startServer() {
-        if (server != null) return
+    private fun connectToServer() {
+        startForeground(NOTIFICATION_ID, buildNotification("Łączenie z serwerem..."))
 
-        startForeground(NOTIFICATION_ID, buildNotification(false))
+        val request = Request.Builder()
+            .url(SERVER_URL)
+            .build()
 
-        serviceScope.launch {
-            try {
-                server = embeddedServer(Netty, port = PORT) {
-                    routing {
-                        // Endpoint do włączania alarmu
-                        get("/play") {
-                            withContext(Dispatchers.Main) {
-                                playAlarm()
-                            }
-                            call.respondText(
-                                """{"status": "playing", "message": "Alarm włączony!"}""",
-                                ContentType.Application.Json
-                            )
-                        }
-
-                        // Endpoint do wyłączania alarmu
-                        get("/stop") {
-                            withContext(Dispatchers.Main) {
-                                stopAlarm()
-                            }
-                            call.respondText(
-                                """{"status": "stopped", "message": "Alarm wyłączony!"}""",
-                                ContentType.Application.Json
-                            )
-                        }
-
-                        // Endpoint statusu
-                        get("/status") {
-                            call.respondText(
-                                """{"server": "running", "alarm": "${if (isAlarmPlaying) "playing" else "stopped"}"}""",
-                                ContentType.Application.Json
-                            )
-                        }
-
-                        // Domyślna strona
-                        get("/") {
-                            call.respondText(
-                                """
-                                <!DOCTYPE html>
-                                <html>
-                                <head>
-                                    <meta name="viewport" content="width=device-width, initial-scale=1">
-                                    <title>Sound Alarm</title>
-                                    <style>
-                                        body { font-family: Arial; text-align: center; padding: 20px; background: #1a1a2e; color: white; }
-                                        button { padding: 20px 40px; margin: 10px; font-size: 18px; border-radius: 10px; border: none; cursor: pointer; }
-                                        .play { background: #e94560; color: white; }
-                                        .stop { background: #0f3460; color: white; }
-                                        h1 { color: #e94560; }
-                                    </style>
-                                </head>
-                                <body>
-                                    <h1>🔔 Sound Alarm</h1>
-                                    <p>Status: <span id="status">Sprawdzanie...</span></p>
-                                    <br>
-                                    <button class="play" onclick="fetch('/play').then(updateStatus)">▶️ PLAY</button>
-                                    <button class="stop" onclick="fetch('/stop').then(updateStatus)">⏹️ STOP</button>
-                                    <script>
-                                        function updateStatus() {
-                                            fetch('/status')
-                                                .then(r => r.json())
-                                                .then(d => document.getElementById('status').innerText = d.alarm === 'playing' ? '🔊 Gra!' : '🔇 Cisza');
-                                        }
-                                        updateStatus();
-                                        setInterval(updateStatus, 2000);
-                                    </script>
-                                </body>
-                                </html>
-                                """.trimIndent(),
-                                ContentType.Text.Html
-                            )
-                        }
-                    }
-                }.start(wait = false)
-
-                // Powiadom UI że serwer wystartował
+        webSocket = client.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                Log.d(TAG, "Połączono z serwerem")
+                updateNotification("Połączono - czekam na sygnał")
                 sendBroadcast(Intent(ACTION_SERVER_STARTED))
-                
-            } catch (e: Exception) {
-                e.printStackTrace()
             }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                Log.d(TAG, "Otrzymano: $text")
+                try {
+                    val json = JSONObject(text)
+                    when (json.optString("action")) {
+                        "play" -> playAlarm()
+                        "stop" -> stopAlarm()
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Błąd parsowania", e)
+                }
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "Zamykanie: $reason")
+            }
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "Zamknięto: $reason")
+                reconnect()
+            }
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.e(TAG, "Błąd WebSocket", t)
+                updateNotification("Błąd połączenia - ponawiam...")
+                reconnect()
+            }
+        })
+    }
+
+    private fun reconnect() {
+        Thread.sleep(5000)
+        if (webSocket != null) {
+            connectToServer()
         }
     }
 
     private fun stopServer() {
         stopAlarm()
-        server?.stop(1000, 2000)
-        server = null
+        webSocket?.close(1000, "User stopped")
+        webSocket = null
         sendBroadcast(Intent(ACTION_SERVER_STOPPED))
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -240,12 +198,10 @@ class AlarmServerService : Service() {
         if (isAlarmPlaying) return
 
         try {
-            // Ustaw głośność na max
             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
             val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
             audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxVolume, 0)
 
-            // Odtwórz dźwięk w pętli
             mediaPlayer = MediaPlayer().apply {
                 setAudioAttributes(
                     AudioAttributes.Builder()
@@ -253,22 +209,19 @@ class AlarmServerService : Service() {
                         .setUsage(AudioAttributes.USAGE_ALARM)
                         .build()
                 )
-                
                 val afd = resources.openRawResourceFd(R.raw.alarm_sound)
                 setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
                 afd.close()
-                
                 isLooping = true
                 prepare()
                 start()
             }
 
             isAlarmPlaying = true
-            updateNotification(true)
+            updateNotification("🔊 ALARM GRA!")
             sendBroadcast(Intent(ACTION_ALARM_STARTED))
-            
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Błąd odtwarzania", e)
         }
     }
 
@@ -277,19 +230,15 @@ class AlarmServerService : Service() {
 
         try {
             mediaPlayer?.apply {
-                if (isPlaying) {
-                    stop()
-                }
+                if (isPlaying) stop()
                 release()
             }
             mediaPlayer = null
-            
             isAlarmPlaying = false
-            updateNotification(false)
+            updateNotification("Połączono - czekam na sygnał")
             sendBroadcast(Intent(ACTION_ALARM_STOPPED))
-            
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Błąd zatrzymania", e)
         }
     }
 }
