@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout 
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#1a1a2e"
+    android:padding="24dp"
+    tools:context=".MainActivity">
+
+    <TextView
+        android:id="@+id/titleText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="🔔 Sound Alarm"
+        android:textColor="#e94560"
+        android:textSize="32sp"
+        android:textStyle="bold"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        android:layout_marginTop="32dp" />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="⏸️ Serwer zatrzymany"
+        android:textColor="#ffffff"
+        android:textSize="20sp"
+        android:layout_marginTop="32dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/titleText" />
+
+    <TextView
+        android:id="@+id/ipText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Naciśnij START aby uruchomić serwer"
+        android:textColor="#aaaaaa"
+        android:textSize="14sp"
+        android:fontFamily="monospace"
+        android:lineSpacingMultiplier="1.4"
+        android:layout_marginTop="24dp"
+        android:padding="16dp"
+        android:background="#0f3460"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/statusText" />
+
+    <Button
+        android:id="@+id/startButton"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="▶️ START SERWER"
+        android:textSize="18sp"
+        android:backgroundTint="#16c79a"
+        android:layout_marginTop="32dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/ipText" />
+
+    <Button
+        android:id="@+id/stopSoundButton"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="🔇 WYŁĄCZ DŹWIĘK"
+        android:textSize="18sp"
+        android:backgroundTint="#e94560"
+        android:layout_marginTop="16dp"
+        android:enabled="false"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/startButton" />
+
+    <Button
+        android:id="@+id/stopServerButton"
+        android:layout_width="match_parent"
+        android:layout_height="60dp"
+        android:text="⏹️ ZATRZYMAJ SERWER"
+        android:textSize="18sp"
+        android:backgroundTint="#0f3460"
+        android:layout_marginTop="16dp"
+        android:enabled="false"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/stopSoundButton" />
+
+    <TextView
+        android:id="@+id/helpText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="💡 Wskazówka: Wyślij request HTTP na /play aby włączyć alarm zdalnie. Użyj curl, przeglądarki lub dowolnego klienta HTTP."
+        android:textColor="#888888"
+        android:textSize="12sp"
+        android:layout_marginTop="24dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/stopServerButton" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>
