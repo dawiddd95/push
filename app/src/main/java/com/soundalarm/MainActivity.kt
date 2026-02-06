@@ -24,6 +24,7 @@ class MainActivity : AppCompatActivity() {
 
     private var isServerRunning = false
     private var isAlarmPlaying = false
+    private var isLocationEnabled = false
 
     private val alarmStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -43,6 +44,15 @@ class MainActivity : AppCompatActivity() {
                 AlarmServerService.ACTION_SERVER_STOPPED -> {
                     isServerRunning = false
                     isAlarmPlaying = false
+                    isLocationEnabled = false
+                    updateUI()
+                }
+                AlarmServerService.ACTION_LOCATION_STARTED -> {
+                    isLocationEnabled = true
+                    updateUI()
+                }
+                AlarmServerService.ACTION_LOCATION_STOPPED -> {
+                    isLocationEnabled = false
                     updateUI()
                 }
             }
@@ -78,6 +88,8 @@ class MainActivity : AppCompatActivity() {
             addAction(AlarmServerService.ACTION_ALARM_STOPPED)
             addAction(AlarmServerService.ACTION_SERVER_STARTED)
             addAction(AlarmServerService.ACTION_SERVER_STOPPED)
+            addAction(AlarmServerService.ACTION_LOCATION_STARTED)
+            addAction(AlarmServerService.ACTION_LOCATION_STOPPED)
         }
         
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -96,14 +108,45 @@ class MainActivity : AppCompatActivity() {
 
     private fun checkPermissions() {
         val permissions = mutableListOf<String>()
+        
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED) {
                 permissions.add(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
+        
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        
         if (permissions.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, permissions.toTypedArray(), 1)
+        } else {
+            checkBackgroundLocationPermission()
+        }
+    }
+    
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 1) {
+            checkBackgroundLocationPermission()
+        }
+    }
+    
+    private fun checkBackgroundLocationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+                    2
+                )
+            }
         }
     }
 
@@ -134,17 +177,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUI() {
         if (isServerRunning) {
-            statusText.text = if (isAlarmPlaying) "🔊 ALARM GRAJĄCY!" else "✅ Połączono z serwerem"
+            statusText.text = when {
+                isAlarmPlaying -> "🔊 ALARM GRAJĄCY!"
+                isLocationEnabled -> "📍 Połączono (GPS włączony)"
+                else -> "✅ Połączono z serwerem"
+            }
             
             infoText.text = """
                 🌐 Serwer: alarm-server-3aag.onrender.com
                 
-                Włącz alarm z dowolnego urządzenia:
+                Panel sterowania:
                 https://alarm-server-3aag.onrender.com
                 
-                Lub przez API:
-                • /play - włącz alarm
-                • /stop - wyłącz alarm
+                Funkcje:
+                • PLAY/STOP - alarm dźwiękowy
+                • GPS ON/OFF - śledzenie lokalizacji
+                • Mapa - podgląd pozycji na żywo
             """.trimIndent()
             
             startButton.isEnabled = false
