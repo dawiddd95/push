@@ -1,5 +1,6 @@
 package com.soundalarm
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,14 +8,19 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.location.Location
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.media.MediaPlayer
 import android.os.Build
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
+import com.google.android.gms.location.*
 import okhttp3.*
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -30,6 +36,8 @@ class AlarmServerService : Service() {
         const val ACTION_ALARM_STOPPED = "com.soundalarm.ALARM_STOPPED"
         const val ACTION_SERVER_STARTED = "com.soundalarm.SERVER_STARTED"
         const val ACTION_SERVER_STOPPED = "com.soundalarm.SERVER_STOPPED"
+        const val ACTION_LOCATION_STARTED = "com.soundalarm.LOCATION_STARTED"
+        const val ACTION_LOCATION_STOPPED = "com.soundalarm.LOCATION_STOPPED"
         
         private const val CHANNEL_ID = "alarm_server_channel"
         private const val NOTIFICATION_ID = 1
@@ -41,6 +49,11 @@ class AlarmServerService : Service() {
     private var mediaPlayer: MediaPlayer? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var isAlarmPlaying = false
+    private var isLocationEnabled = false
+    
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
+    private lateinit var locationCallback: LocationCallback
+    
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
@@ -51,6 +64,19 @@ class AlarmServerService : Service() {
         super.onCreate()
         createNotificationChannel()
         acquireWakeLock()
+        setupLocationClient()
+    }
+
+    private fun setupLocationClient() {
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+        
+        locationCallback = object : LocationCallback() {
+            override fun onLocationResult(locationResult: LocationResult) {
+                locationResult.lastLocation?.let { location ->
+                    sendLocationToServer(location)
+                }
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -65,6 +91,7 @@ class AlarmServerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopAlarm()
+        stopLocationUpdates()
         webSocket?.close(1000, "Service destroyed")
         wakeLock?.release()
     }
@@ -109,8 +136,14 @@ class AlarmServerService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val title = when {
+            isAlarmPlaying -> "🔊 ALARM!"
+            isLocationEnabled -> "📍 Sound Alarm (GPS włączony)"
+            else -> "Sound Alarm"
+        }
+
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(if (isAlarmPlaying) "🔊 ALARM!" else "Sound Alarm")
+            .setContentTitle(title)
             .setContentText(status)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
@@ -155,6 +188,8 @@ class AlarmServerService : Service() {
                     when (json.optString("action")) {
                         "play" -> playAlarm()
                         "stop" -> stopAlarm()
+                        "location_on" -> startLocationUpdates()
+                        "location_off" -> stopLocationUpdates()
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Błąd parsowania", e)
@@ -179,14 +214,17 @@ class AlarmServerService : Service() {
     }
 
     private fun reconnect() {
-        Thread.sleep(5000)
-        if (webSocket != null) {
-            connectToServer()
-        }
+        Thread {
+            Thread.sleep(5000)
+            if (webSocket != null) {
+                connectToServer()
+            }
+        }.start()
     }
 
     private fun stopServer() {
         stopAlarm()
+        stopLocationUpdates()
         webSocket?.close(1000, "User stopped")
         webSocket = null
         sendBroadcast(Intent(ACTION_SERVER_STOPPED))
@@ -240,5 +278,51 @@ class AlarmServerService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Błąd zatrzymania", e)
         }
+    }
+
+    private fun startLocationUpdates() {
+        if (isLocationEnabled) return
+        
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
+            != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "Brak uprawnień do lokalizacji")
+            return
+        }
+
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000)
+            .setWaitForAccurateLocation(false)
+            .setMinUpdateIntervalMillis(3000)
+            .build()
+
+        fusedLocationClient.requestLocationUpdates(
+            locationRequest,
+            locationCallback,
+            Looper.getMainLooper()
+        )
+        
+        isLocationEnabled = true
+        updateNotification("Połączono - GPS włączony")
+        sendBroadcast(Intent(ACTION_LOCATION_STARTED))
+        Log.d(TAG, "Lokalizacja włączona")
+    }
+
+    private fun stopLocationUpdates() {
+        if (!isLocationEnabled) return
+        
+        fusedLocationClient.removeLocationUpdates(locationCallback)
+        isLocationEnabled = false
+        updateNotification("Połączono - czekam na sygnał")
+        sendBroadcast(Intent(ACTION_LOCATION_STOPPED))
+        Log.d(TAG, "Lokalizacja wyłączona")
+    }
+
+    private fun sendLocationToServer(location: Location) {
+        val json = JSONObject().apply {
+            put("type", "location")
+            put("lat", location.latitude)
+            put("lng", location.longitude)
+        }
+        webSocket?.send(json.toString())
+        Log.d(TAG, "Wysłano lokalizację: ${location.latitude}, ${location.longitude}")
     }
 }
