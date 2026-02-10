@@ -31,14 +31,14 @@ class AlarmServerService : Service() {
         const val ACTION_START_SERVER = "com.soundalarm.START_SERVER"
         const val ACTION_STOP_SERVER = "com.soundalarm.STOP_SERVER"
         const val ACTION_STOP_ALARM = "com.soundalarm.STOP_ALARM"
-        
+
         const val ACTION_ALARM_STARTED = "com.soundalarm.ALARM_STARTED"
         const val ACTION_ALARM_STOPPED = "com.soundalarm.ALARM_STOPPED"
         const val ACTION_SERVER_STARTED = "com.soundalarm.SERVER_STARTED"
         const val ACTION_SERVER_STOPPED = "com.soundalarm.SERVER_STOPPED"
         const val ACTION_LOCATION_STARTED = "com.soundalarm.LOCATION_STARTED"
         const val ACTION_LOCATION_STOPPED = "com.soundalarm.LOCATION_STOPPED"
-        
+
         private const val CHANNEL_ID = "alarm_server_channel"
         private const val NOTIFICATION_ID = 1
         private const val SERVER_URL = "wss://alarm-server-3aag.onrender.com"
@@ -50,12 +50,20 @@ class AlarmServerService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var isAlarmPlaying = false
     private var isLocationEnabled = false
-    
+
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var locationCallback: LocationCallback
-    
+
+    // NOWE: sterowanie reconnectem
+    private var shouldReconnect = false
+    private var reconnectDelayMs = 5_000L
+    private val maxReconnectDelayMs = 60_000L
+
+    // ZMIANA: klient z pingInterval + retry
     private val client = OkHttpClient.Builder()
-        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .readTimeout(0, TimeUnit.MILLISECONDS)          // dla WebSocket
+        .pingInterval(15, TimeUnit.SECONDS)             // ping co 15s
+        .retryOnConnectionFailure(true)
         .build()
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -69,7 +77,7 @@ class AlarmServerService : Service() {
 
     private fun setupLocationClient() {
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-        
+
         locationCallback = object : LocationCallback() {
             override fun onLocationResult(locationResult: LocationResult) {
                 locationResult.lastLocation?.let { location ->
@@ -90,10 +98,15 @@ class AlarmServerService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        shouldReconnect = false
         stopAlarm()
         stopLocationUpdates()
         webSocket?.close(1000, "Service destroyed")
-        wakeLock?.release()
+        webSocket = null
+        try {
+            wakeLock?.takeIf { it.isHeld }?.release()
+        } catch (_: Exception) {
+        }
     }
 
     private fun createNotificationChannel() {
@@ -168,6 +181,13 @@ class AlarmServerService : Service() {
     }
 
     private fun connectToServer() {
+        // jeśli już mamy żywe połączenie – nic nie rób
+        if (webSocket != null) {
+            Log.d(TAG, "connectToServer: WebSocket już istnieje")
+            return
+        }
+
+        shouldReconnect = true
         startForeground(NOTIFICATION_ID, buildNotification("Łączenie z serwerem..."))
 
         val request = Request.Builder()
@@ -177,6 +197,7 @@ class AlarmServerService : Service() {
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d(TAG, "Połączono z serwerem")
+                reconnectDelayMs = 5_000L // reset backoff
                 updateNotification("Połączono - czekam na sygnał")
                 sendBroadcast(Intent(ACTION_SERVER_STARTED))
             }
@@ -202,27 +223,41 @@ class AlarmServerService : Service() {
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "Zamknięto: $reason")
-                reconnect()
+                this@AlarmServerService.webSocket = null
+                scheduleReconnect()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "Błąd WebSocket", t)
+                this@AlarmServerService.webSocket = null
                 updateNotification("Błąd połączenia - ponawiam...")
-                reconnect()
+                scheduleReconnect()
             }
         })
     }
 
-    private fun reconnect() {
-        Thread {
-            Thread.sleep(5000)
-            if (webSocket != null) {
+    // NOWE: reconnect z backoffem
+    private fun scheduleReconnect() {
+        if (!shouldReconnect) {
+            Log.d(TAG, "scheduleReconnect: shouldReconnect = false, nie łączę ponownie")
+            return
+        }
+
+        val delay = reconnectDelayMs
+        reconnectDelayMs = (reconnectDelayMs * 2).coerceAtMost(maxReconnectDelayMs)
+
+        Log.d(TAG, "Ponowna próba połączenia za ${delay} ms")
+
+        val handler = android.os.Handler(Looper.getMainLooper())
+        handler.postDelayed({
+            if (shouldReconnect && webSocket == null) {
                 connectToServer()
             }
-        }.start()
+        }, delay)
     }
 
     private fun stopServer() {
+        shouldReconnect = false
         stopAlarm()
         stopLocationUpdates()
         webSocket?.close(1000, "User stopped")
@@ -282,9 +317,10 @@ class AlarmServerService : Service() {
 
     private fun startLocationUpdates() {
         if (isLocationEnabled) return
-        
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
-            != PackageManager.PERMISSION_GRANTED) {
+
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
             Log.e(TAG, "Brak uprawnień do lokalizacji")
             return
         }
@@ -299,7 +335,7 @@ class AlarmServerService : Service() {
             locationCallback,
             Looper.getMainLooper()
         )
-        
+
         isLocationEnabled = true
         updateNotification("Połączono - GPS włączony")
         sendBroadcast(Intent(ACTION_LOCATION_STARTED))
@@ -308,7 +344,7 @@ class AlarmServerService : Service() {
 
     private fun stopLocationUpdates() {
         if (!isLocationEnabled) return
-        
+
         fusedLocationClient.removeLocationUpdates(locationCallback)
         isLocationEnabled = false
         updateNotification("Połączono - czekam na sygnał")
